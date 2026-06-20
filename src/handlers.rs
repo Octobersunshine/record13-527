@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::models::{
     Cleaner, CleaningTask, CleaningTaskDetail, CreateCleaner, CreateCleaningTask, CreateRoom,
-    TaskStatus, UpdateCleaner, UpdateCleaningTask, UpdateRoom, Room,
+    RoomStatus, TaskStatus, UpdateCleaner, UpdateCleaningTask, UpdateProgress, UpdateRoom, Room,
 };
 use crate::state::AppState;
 
@@ -141,6 +141,7 @@ pub async fn create_room(
         room_number: payload.room_number,
         floor: payload.floor,
         room_type: payload.room_type,
+        status: RoomStatus::Available,
         created_at: now,
     };
 
@@ -185,6 +186,9 @@ pub async fn update_room(
     }
     if let Some(room_type) = payload.room_type {
         room.room_type = room_type;
+    }
+    if let Some(status) = payload.status {
+        room.status = status;
     }
 
     Ok(Json(room.clone()))
@@ -320,6 +324,10 @@ pub async fn create_task(
 
     inner.tasks.push(task.clone());
 
+    if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == task.room_id) {
+        room.status = RoomStatus::Cleaning;
+    }
+
     let cleaner = inner
         .cleaners
         .iter()
@@ -396,31 +404,69 @@ pub async fn update_task(
         ));
     }
 
-    let task = &mut inner.tasks[task_idx];
+    let current_room_id = inner.tasks[task_idx].room_id;
 
     if let Some(cleaner_id) = payload.cleaner_id {
-        task.cleaner_id = cleaner_id;
+        inner.tasks[task_idx].cleaner_id = cleaner_id;
     }
 
     if let Some(room_id) = payload.room_id {
-        task.room_id = room_id;
+        inner.tasks[task_idx].room_id = room_id;
     }
 
-    if let Some(status) = payload.status {
-        task.status = status;
+    let new_room_id = inner.tasks[task_idx].room_id;
+
+    if let Some(status) = &payload.status {
+        match status {
+            TaskStatus::Completed => {
+                if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == new_room_id) {
+                    room.status = RoomStatus::Available;
+                }
+            }
+            TaskStatus::InProgress => {
+                if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == new_room_id) {
+                    room.status = RoomStatus::Cleaning;
+                }
+            }
+            TaskStatus::Cancelled => {
+                let room_has_other_active = inner.tasks.iter().any(|t| {
+                    t.id != id
+                        && t.room_id == new_room_id
+                        && !matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled)
+                });
+                if !room_has_other_active {
+                    if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == new_room_id) {
+                        room.status = RoomStatus::Available;
+                    }
+                }
+                if current_room_id != new_room_id {
+                    let old_has_other = inner.tasks.iter().any(|t| {
+                        t.room_id == current_room_id
+                            && !matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled)
+                    });
+                    if !old_has_other {
+                        if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == current_room_id) {
+                            room.status = RoomStatus::Available;
+                        }
+                    }
+                }
+            }
+            TaskStatus::Pending => {}
+        }
+        inner.tasks[task_idx].status = status.clone();
     }
 
     if let Some(scheduled_date) = payload.scheduled_date {
-        task.scheduled_date = scheduled_date;
+        inner.tasks[task_idx].scheduled_date = scheduled_date;
     }
 
     if payload.remarks.is_some() {
-        task.remarks = payload.remarks;
+        inner.tasks[task_idx].remarks = payload.remarks;
     }
 
-    task.updated_at = Utc::now().naive_utc();
+    inner.tasks[task_idx].updated_at = Utc::now().naive_utc();
 
-    let task = task.clone();
+    let task = inner.tasks[task_idx].clone();
     let cleaner = inner
         .cleaners
         .iter()
@@ -453,6 +499,12 @@ pub async fn delete_task(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut inner = state.inner.lock().await;
 
+    let task_room_id = inner
+        .tasks
+        .iter()
+        .find(|t| t.id == id)
+        .map(|t| t.room_id);
+
     let initial_len = inner.tasks.len();
     inner.tasks.retain(|t| t.id != id);
 
@@ -460,5 +512,119 @@ pub async fn delete_task(
         return Err(AppError::NotFound);
     }
 
+    if let Some(room_id) = task_room_id {
+        let room_has_active = inner.tasks.iter().any(|t| {
+            t.room_id == room_id
+                && !matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled)
+        });
+        if !room_has_active {
+            if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == room_id) {
+                room.status = RoomStatus::Available;
+            }
+        }
+    }
+
     Ok(Json(serde_json::json!({ "message": "删除成功" })))
+}
+
+pub async fn update_task_progress(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateProgress>,
+) -> Result<Json<CleaningTaskDetail>, AppError> {
+    let mut inner = state.inner.lock().await;
+
+    let task_idx = inner
+        .tasks
+        .iter()
+        .position(|t| t.id == id)
+        .ok_or(AppError::NotFound)?;
+
+    let current_status = inner.tasks[task_idx].status.clone();
+    let room_id = inner.tasks[task_idx].room_id;
+
+    match &payload.status {
+        TaskStatus::InProgress => {
+            if !matches!(current_status, TaskStatus::Pending) {
+                return Err(AppError::BadRequest(
+                    "只有待处理的工单才能开始清洁".to_string(),
+                ));
+            }
+        }
+        TaskStatus::Completed => {
+            if !matches!(current_status, TaskStatus::InProgress) {
+                return Err(AppError::BadRequest(
+                    "只有进行中的工单才能标记完成".to_string(),
+                ));
+            }
+        }
+        TaskStatus::Cancelled => {
+            if matches!(current_status, TaskStatus::Completed | TaskStatus::Cancelled) {
+                return Err(AppError::BadRequest(
+                    "已完成或已取消的工单无法取消".to_string(),
+                ));
+            }
+        }
+        TaskStatus::Pending => {
+            return Err(AppError::BadRequest(
+                "不能将工单状态回退为待处理".to_string(),
+            ));
+        }
+    }
+
+    match &payload.status {
+        TaskStatus::InProgress => {
+            if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == room_id) {
+                room.status = RoomStatus::Cleaning;
+            }
+        }
+        TaskStatus::Completed => {
+            if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == room_id) {
+                room.status = RoomStatus::Available;
+            }
+        }
+        TaskStatus::Cancelled => {
+            let room_has_other_active = inner.tasks.iter().any(|t| {
+                t.id != id
+                    && t.room_id == room_id
+                    && !matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled)
+            });
+            if !room_has_other_active {
+                if let Some(room) = inner.rooms.iter_mut().find(|r| r.id == room_id) {
+                    room.status = RoomStatus::Available;
+                }
+            }
+        }
+        TaskStatus::Pending => unreachable!(),
+    }
+
+    let task = &mut inner.tasks[task_idx];
+    task.status = payload.status;
+    task.updated_at = Utc::now().naive_utc();
+
+    let task = task.clone();
+    let cleaner = inner
+        .cleaners
+        .iter()
+        .find(|c| c.id == task.cleaner_id)
+        .cloned()
+        .unwrap();
+
+    let room = inner
+        .rooms
+        .iter()
+        .find(|r| r.id == task.room_id)
+        .cloned()
+        .unwrap();
+
+    Ok(Json(CleaningTaskDetail {
+        id: task.id,
+        cleaner,
+        room,
+        status: task.status,
+        scheduled_date: task.scheduled_date,
+        remarks: task.remarks,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+    }))
 }

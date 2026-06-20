@@ -21,12 +21,20 @@ pub struct UpdateCleaner {
     pub phone: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum RoomStatus {
+    Available,
+    Occupied,
+    Cleaning,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub id: Uuid,
     pub room_number: String,
     pub floor: i32,
     pub room_type: String,
+    pub status: RoomStatus,
     pub created_at: chrono::NaiveDateTime,
 }
 
@@ -42,6 +50,7 @@ pub struct UpdateRoom {
     pub room_number: Option<String>,
     pub floor: Option<i32>,
     pub room_type: Option<String>,
+    pub status: Option<RoomStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,4 +100,9 @@ pub struct CleaningTaskDetail {
     pub remarks: Option<String>,
     pub created_at: chrono::NaiveDateTime,
     pub updated_at: chrono::NaiveDateTime,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateProgress {
+    pub status: TaskStatus,
 }

@@ -1,5 +1,5 @@
 use axum::{
-    routing::get,
+    routing::{get, put},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
@@ -42,6 +42,7 @@ async fn main() {
                 .put(handlers::update_task)
                 .delete(handlers::delete_task),
         )
+        .route("/api/tasks/:id/progress", put(handlers::update_task_progress))
         .layer(cors)
         .with_state(state);
 
@@ -67,11 +68,12 @@ async fn main() {
     println!("    DELETE /api/rooms/:id      - 删除房间");
     println!();
     println!("  清洁工单:");
-    println!("    GET    /api/tasks          - 获取清洁工单列表");
-    println!("    POST   /api/tasks          - 创建清洁工单");
-    println!("    GET    /api/tasks/:id      - 获取清洁工单详情");
-    println!("    PUT    /api/tasks/:id      - 更新清洁工单");
-    println!("    DELETE /api/tasks/:id      - 删除清洁工单");
+    println!("    GET    /api/tasks                - 获取清洁工单列表");
+    println!("    POST   /api/tasks                - 创建清洁工单");
+    println!("    GET    /api/tasks/:id            - 获取清洁工单详情");
+    println!("    PUT    /api/tasks/:id            - 更新清洁工单");
+    println!("    DELETE /api/tasks/:id            - 删除清洁工单");
+    println!("    PUT    /api/tasks/:id/progress   - 更新清洁进度");
 
     axum::serve(listener, app).await.unwrap();
 }
