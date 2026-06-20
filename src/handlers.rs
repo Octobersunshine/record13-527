@@ -295,6 +295,17 @@ pub async fn create_task(
         return Err(AppError::BadRequest("指定的房间不存在".to_string()));
     }
 
+    let duplicate = inner.tasks.iter().any(|t| {
+        t.room_id == payload.room_id
+            && t.scheduled_date == payload.scheduled_date
+            && !matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled)
+    });
+    if duplicate {
+        return Err(AppError::BadRequest(
+            "该房间在指定日期已有未完成的清洁工单".to_string(),
+        ));
+    }
+
     let now = Utc::now().naive_utc();
     let task = CleaningTask {
         id: Uuid::new_v4(),
@@ -364,6 +375,25 @@ pub async fn update_task(
         if scheduled_date.trim().is_empty() {
             return Err(AppError::BadRequest("计划日期不能为空".to_string()));
         }
+    }
+
+    let current_task = &inner.tasks[task_idx];
+    let effective_room_id = payload.room_id.unwrap_or(current_task.room_id);
+    let effective_date = payload
+        .scheduled_date
+        .as_deref()
+        .unwrap_or(&current_task.scheduled_date);
+
+    let duplicate = inner.tasks.iter().any(|t| {
+        t.id != id
+            && t.room_id == effective_room_id
+            && t.scheduled_date == effective_date
+            && !matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled)
+    });
+    if duplicate {
+        return Err(AppError::BadRequest(
+            "该房间在指定日期已有未完成的清洁工单".to_string(),
+        ));
     }
 
     let task = &mut inner.tasks[task_idx];
